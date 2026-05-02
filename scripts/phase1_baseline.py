@@ -44,29 +44,43 @@ OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def load_evaluation_prompts(n: int = 50):
-    """Load diverse prompts from LongBench across three task types."""
-    from datasets import load_dataset
+    """
+    Load diverse prompts from LongBench via direct JSONL download.
+    Uses huggingface_hub directly to avoid datasets library loading-script issues.
+    """
+    from huggingface_hub import hf_hub_download
+    import json
+
+    def _load_jsonl(task_name):
+        path = hf_hub_download(
+            repo_id="THUDM/LongBench",
+            filename=f"data/{task_name}.jsonl",
+            repo_type="dataset",
+        )
+        items = []
+        with open(path) as f:
+            for line in f:
+                if line.strip():
+                    items.append(json.loads(line))
+        return items
 
     prompts = []
 
-    ds = load_dataset("THUDM/LongBench", "2wikimqa_e", split="test", trust_remote_code=True)
-    for item in list(ds)[:n // 3]:
+    for item in _load_jsonl("2wikimqa_e")[:n // 3]:
         prompts.append({
             "text": item["context"] + "\n\nQuestion: " + item["input"],
             "task": "multi_hop_qa",
             "answer": item["answers"][0] if item["answers"] else "",
         })
 
-    ds = load_dataset("THUDM/LongBench", "qasper_e", split="test", trust_remote_code=True)
-    for item in list(ds)[:n // 3]:
+    for item in _load_jsonl("qasper_e")[:n // 3]:
         prompts.append({
             "text": item["context"] + "\n\nQuestion: " + item["input"],
             "task": "document_qa",
             "answer": item["answers"][0] if item["answers"] else "",
         })
 
-    ds = load_dataset("THUDM/LongBench", "multi_news_e", split="test", trust_remote_code=True)
-    for item in list(ds)[:n // 3]:
+    for item in _load_jsonl("multi_news_e")[:n // 3]:
         prompts.append({
             "text": item["context"] + "\n\nSummarize the above:",
             "task": "summarization",
