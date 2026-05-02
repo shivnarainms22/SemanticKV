@@ -210,6 +210,17 @@ def compute_importance_scores(
 
     positions_to_test = list(range(skip_first_n, seq_len - skip_last_n))
 
+    if not positions_to_test:
+        # Prompt too short for the skip margins — score everything as important.
+        importance_scores = np.ones(seq_len)
+        return {
+            "tokens": tokens,
+            "importance_scores": importance_scores,
+            "baseline_logits": baseline_logits.cpu().numpy(),
+            "seq_len": seq_len,
+            "prompt": prompt,
+        }
+
     if sample_fraction < 1.0:
         n_sample = max(1, int(len(positions_to_test) * sample_fraction))
         positions_to_test = np.random.choice(
