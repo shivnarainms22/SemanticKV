@@ -167,14 +167,15 @@ def compute_output_divergence(
     KL(P_baseline || P_ablated) averaged across all generation steps.
     Higher divergence = ablated token had more causal impact on generation.
     """
-    baseline_probs = F.softmax(baseline_logits, dim=-1)
-    ablated_probs = F.softmax(ablated_logits, dim=-1)
+    eps = 1e-10
+    baseline_probs = F.softmax(baseline_logits, dim=-1).clamp(min=eps)
+    ablated_probs  = F.softmax(ablated_logits,  dim=-1).clamp(min=eps)
 
     kl_per_step = F.kl_div(
         ablated_probs.log(),
         baseline_probs,
         reduction='none'
-    ).sum(dim=-1)   # [steps]
+    ).clamp(min=0).sum(dim=-1)   # clamp kills rare fp negatives near 0
 
     return kl_per_step.mean().item()
 
