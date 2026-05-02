@@ -46,6 +46,29 @@ def run_baseline_forward(
     return torch.stack(scores, dim=0)               # [max_new_tokens, vocab]
 
 
+def _ablate_kv(past_kv, ablate_position: int):
+    """
+    Zero v at ablate_position in past_key_values.
+    Handles both transformers 5.x DynamicCache and legacy tuple-of-tuples.
+    """
+    if hasattr(past_kv, 'key_cache'):
+        # transformers >= 5.x: DynamicCache with .key_cache / .value_cache lists
+        for i in range(len(past_kv.key_cache)):
+            past_kv.value_cache[i] = past_kv.value_cache[i].clone()
+            past_kv.value_cache[i][:, :, ablate_position, :] = 0.0
+        return past_kv
+    else:
+        # Legacy tuple-of-tuples; first two elements per layer are (key, value).
+        # Use index access instead of unpacking to handle layers with >2 elements.
+        ablated = []
+        for layer_kv in past_kv:
+            layer = list(layer_kv)
+            layer[1] = layer[1].clone()
+            layer[1][:, :, ablate_position, :] = 0.0
+            ablated.append(tuple(layer))
+        return tuple(ablated)
+
+
 def run_ablated_forward(
     model,
     input_ids: torch.Tensor,
@@ -62,10 +85,6 @@ def run_ablated_forward(
       3. During each generation step, extend the mask to keep ablate_position
          excluded from all future attention.
 
-    This is the correct approach: masking k via attention_mask fixes the
-    softmax normalization; zeroing v ensures zero value contribution even
-    if the mask is not applied perfectly by all attention kernel paths.
-
     Returns: [max_new_tokens, vocab_size]
     """
     seq_len = input_ids.shape[1]
@@ -77,15 +96,7 @@ def run_ablated_forward(
         prefill_mask[:, ablate_position] = 0
 
         prefill_out = model(input_ids, attention_mask=prefill_mask, use_cache=True)
-        past_kv = prefill_out.past_key_values
-
-        # Zero v at ablated position in every layer (belt-and-suspenders)
-        ablated_kv = []
-        for k, v in past_kv:
-            v = v.clone()
-            v[:, :, ablate_position, :] = 0.0
-            ablated_kv.append((k, v))
-        past_kv = tuple(ablated_kv)
+        past_kv = _ablate_kv(prefill_out.past_key_values, ablate_position)
 
         # First generation step reuses prefill logits — no extra forward pass
         next_logits = prefill_out.logits[:, -1, :]
@@ -93,7 +104,6 @@ def run_ablated_forward(
         next_token = next_logits.argmax(dim=-1, keepdim=True)
 
         for step in range(max_new_tokens - 1):
-            # Mask covers: original seq_len tokens + `step` already-generated + 1 current
             current_past_len = seq_len + step
             gen_mask = torch.ones(1, current_past_len + 1, dtype=torch.long, device=input_ids.device)
             gen_mask[:, ablate_position] = 0
