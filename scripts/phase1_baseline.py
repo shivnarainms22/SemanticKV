@@ -45,24 +45,22 @@ OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 def load_evaluation_prompts(n: int = 50):
     """
-    Load diverse prompts from LongBench via direct JSONL download.
-    Uses huggingface_hub directly to avoid datasets library loading-script issues.
+    Load diverse prompts from LongBench.
+    Downloads data.zip from HuggingFace Hub and reads JSONL files directly.
     """
     from huggingface_hub import hf_hub_download
-    import json
+    import json, zipfile
+
+    zip_path = hf_hub_download(
+        repo_id="THUDM/LongBench",
+        filename="data.zip",
+        repo_type="dataset",
+    )
 
     def _load_jsonl(task_name):
-        path = hf_hub_download(
-            repo_id="THUDM/LongBench",
-            filename=f"data/{task_name}.jsonl",
-            repo_type="dataset",
-        )
-        items = []
-        with open(path) as f:
-            for line in f:
-                if line.strip():
-                    items.append(json.loads(line))
-        return items
+        with zipfile.ZipFile(zip_path) as zf:
+            with zf.open(f"data/{task_name}.jsonl") as f:
+                return [json.loads(line) for line in f if line.strip()]
 
     prompts = []
 
