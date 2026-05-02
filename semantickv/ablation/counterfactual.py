@@ -113,46 +113,24 @@ def run_ablated_forward(
     max_new_tokens: int = 50,
 ) -> torch.Tensor:
     """
-    Run generation with position `ablate_position` removed from the KV cache.
+    Run generation with token at `ablate_position` removed from the input.
 
-    Strategy:
-      1. Pass attention_mask=0 at ablate_position during prefill so the
-         softmax denominator excludes it during the initial forward pass.
-      2. Zero v at that position in the resulting cache.
-      3. During each generation step, re-zero after every cache update —
-         no per-step attention mask (transformers 5.7 DynamicCache returns
-         NaN when a full-sequence mask is passed during single-token decoding).
+    This is the correct counterfactual for KV cache eviction: the evicted token
+    is absent from both key lookup (attention weights) and value aggregation.
+    We remove it from the prompt entirely and run normal greedy generation,
+    which avoids all cache-surgery complexity and NaN issues from masked softmax.
+
+    NOTE: tokens after ablate_position are shifted left by one, so their
+    RoPE positions change by 1. This is a minor effect vs. the information
+    content difference being measured.
 
     Returns: [max_new_tokens, vocab_size]
     """
-    seq_len = input_ids.shape[1]
-    scores = []
-
-    with torch.no_grad():
-        # Prefill: exclude ablate_position from attention so its KV is
-        # computed as if it were invisible, then zero its value in the cache.
-        prefill_mask = torch.ones(1, seq_len, dtype=torch.long, device=input_ids.device)
-        prefill_mask[:, ablate_position] = 0
-
-        prefill_out = model(input_ids, attention_mask=prefill_mask, use_cache=True)
-        past_kv = _ablate_kv(prefill_out.past_key_values, ablate_position)
-
-        # Score 0: derived from prefill — ablated position already excluded
-        next_logits = prefill_out.logits[:, -1, :]
-        scores.append(next_logits.squeeze(0))
-        next_token = next_logits.argmax(dim=-1, keepdim=True)
-
-        for _ in range(max_new_tokens - 1):
-            # No attention_mask here — the value tensor at ablate_position is
-            # zeroed, so it contributes 0 to every attention output regardless.
-            # Re-zero after update because the cache grows by appending.
-            out = model(next_token, past_key_values=past_kv, use_cache=True)
-            next_logits = out.logits[:, -1, :]
-            scores.append(next_logits.squeeze(0))
-            past_kv = _ablate_kv(out.past_key_values, ablate_position)
-            next_token = next_logits.argmax(dim=-1, keepdim=True)
-
-    return torch.stack(scores, dim=0)   # [max_new_tokens, vocab]
+    ablated_ids = torch.cat([
+        input_ids[:, :ablate_position],
+        input_ids[:, ablate_position + 1:],
+    ], dim=1)
+    return run_baseline_forward(model, ablated_ids, max_new_tokens)
 
 
 def compute_output_divergence(
