@@ -28,7 +28,7 @@ def load_model(
 
     model = AutoModelForCausalLM.from_pretrained(
         model_path,
-        torch_dtype=dtype,
+        dtype=dtype,
         device_map=device,
         attn_implementation="eager",   # NOT flash_attention_2
         output_attentions=False,        # We use hooks instead (more efficient)

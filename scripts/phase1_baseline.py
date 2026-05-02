@@ -49,7 +49,7 @@ def load_evaluation_prompts(n: int = 50):
 
     prompts = []
 
-    ds = load_dataset("THUDM/LongBench", "2wikimqa_e", split="test")
+    ds = load_dataset("THUDM/LongBench", "2wikimqa_e", split="test", trust_remote_code=True)
     for item in list(ds)[:n // 3]:
         prompts.append({
             "text": item["context"] + "\n\nQuestion: " + item["input"],
@@ -57,7 +57,7 @@ def load_evaluation_prompts(n: int = 50):
             "answer": item["answers"][0] if item["answers"] else "",
         })
 
-    ds = load_dataset("THUDM/LongBench", "qasper_e", split="test")
+    ds = load_dataset("THUDM/LongBench", "qasper_e", split="test", trust_remote_code=True)
     for item in list(ds)[:n // 3]:
         prompts.append({
             "text": item["context"] + "\n\nQuestion: " + item["input"],
@@ -65,7 +65,7 @@ def load_evaluation_prompts(n: int = 50):
             "answer": item["answers"][0] if item["answers"] else "",
         })
 
-    ds = load_dataset("THUDM/LongBench", "multi_news_e", split="test")
+    ds = load_dataset("THUDM/LongBench", "multi_news_e", split="test", trust_remote_code=True)
     for item in list(ds)[:n // 3]:
         prompts.append({
             "text": item["context"] + "\n\nSummarize the above:",
