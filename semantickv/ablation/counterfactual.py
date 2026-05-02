@@ -117,10 +117,11 @@ def run_ablated_forward(
 
     Strategy:
       1. Pass attention_mask=0 at ablate_position during prefill so the
-         softmax denominator excludes it from the start.
-      2. Zero v at that position in the resulting cache as belt-and-suspenders.
-      3. During each generation step, extend the mask to keep ablate_position
-         excluded from all future attention.
+         softmax denominator excludes it during the initial forward pass.
+      2. Zero v at that position in the resulting cache.
+      3. During each generation step, re-zero after every cache update —
+         no per-step attention mask (transformers 5.7 DynamicCache returns
+         NaN when a full-sequence mask is passed during single-token decoding).
 
     Returns: [max_new_tokens, vocab_size]
     """
@@ -128,32 +129,27 @@ def run_ablated_forward(
     scores = []
 
     with torch.no_grad():
-        # Prefill mask: [batch, seq_len], 1=attend, 0=exclude
+        # Prefill: exclude ablate_position from attention so its KV is
+        # computed as if it were invisible, then zero its value in the cache.
         prefill_mask = torch.ones(1, seq_len, dtype=torch.long, device=input_ids.device)
         prefill_mask[:, ablate_position] = 0
 
         prefill_out = model(input_ids, attention_mask=prefill_mask, use_cache=True)
         past_kv = _ablate_kv(prefill_out.past_key_values, ablate_position)
 
-        # First generation step reuses prefill logits — no extra forward pass
+        # Score 0: derived from prefill — ablated position already excluded
         next_logits = prefill_out.logits[:, -1, :]
         scores.append(next_logits.squeeze(0))
         next_token = next_logits.argmax(dim=-1, keepdim=True)
 
-        for step in range(max_new_tokens - 1):
-            current_past_len = seq_len + step
-            gen_mask = torch.ones(1, current_past_len + 1, dtype=torch.long, device=input_ids.device)
-            gen_mask[:, ablate_position] = 0
-
-            out = model(
-                next_token,
-                past_key_values=past_kv,
-                attention_mask=gen_mask,
-                use_cache=True,
-            )
+        for _ in range(max_new_tokens - 1):
+            # No attention_mask here — the value tensor at ablate_position is
+            # zeroed, so it contributes 0 to every attention output regardless.
+            # Re-zero after update because the cache grows by appending.
+            out = model(next_token, past_key_values=past_kv, use_cache=True)
             next_logits = out.logits[:, -1, :]
             scores.append(next_logits.squeeze(0))
-            past_kv = out.past_key_values
+            past_kv = _ablate_kv(out.past_key_values, ablate_position)
             next_token = next_logits.argmax(dim=-1, keepdim=True)
 
     return torch.stack(scores, dim=0)   # [max_new_tokens, vocab]
