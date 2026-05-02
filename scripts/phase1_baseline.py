@@ -137,7 +137,7 @@ def main():
         tokens = tokenizer(prompt_data["text"], return_tensors="pt")
         seq_len = tokens["input_ids"].shape[1]
 
-        if seq_len < 100 or seq_len > 3000:
+        if seq_len < 100 or seq_len > 8000:
             print(f"  Skipping: seq_len={seq_len} out of range")
             continue
 
