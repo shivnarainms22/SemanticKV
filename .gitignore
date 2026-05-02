@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Models (too large for git)
+models/
+
+# Data (generated, not source)
+data/
+
+# Experiment outputs and checkpoints
+experiments/checkpoints/
+experiments/phase*/
+experiments/feature_ablation/
+
+# Environment
+.env
+*.env
+wandb/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/

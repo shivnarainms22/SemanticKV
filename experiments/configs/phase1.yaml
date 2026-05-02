@@ -1,0 +1,10 @@
+model_path: ./models/llama3-8b-instruct
+n_prompts: 50
+keep_fraction: 0.3
+max_new_tokens: 50
+sample_fraction: 0.5
+output_dir: ./data/processed/phase1_results
+
+# For sanity-check run (cheap, ~10 min):
+# n_prompts: 3
+# sample_fraction: 0.1
