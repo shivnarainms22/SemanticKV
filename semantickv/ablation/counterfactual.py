@@ -46,20 +46,37 @@ def run_baseline_forward(
     return torch.stack(scores, dim=0)               # [max_new_tokens, vocab]
 
 
+def _zero_value_tensor(layer, position: int) -> bool:
+    """Try to zero value tensor at `position` in a cache layer object. Returns True if zeroed."""
+    for attr in ('values', 'value_states', 'value_cache', 'v_cache', '_v_cache'):
+        v = getattr(layer, attr, None)
+        if isinstance(v, torch.Tensor) and v.dim() == 4 and v.shape[2] > position:
+            v_new = v.clone()
+            v_new[:, :, position, :] = 0.0
+            try:
+                setattr(layer, attr, v_new)
+                return True
+            except (AttributeError, TypeError):
+                pass
+    return False
+
+
 def _ablate_kv(past_kv, ablate_position: int):
     """
     Zero v at ablate_position in past_key_values.
-    Handles both transformers 5.x DynamicCache and legacy tuple-of-tuples.
+
+    Handles three cache formats:
+      - Legacy tuple-of-tuples (pre-transformers-4.x)
+      - transformers 4.x/5.0-5.6 DynamicCache (.key_cache / .value_cache lists)
+      - transformers 5.7+ DynamicCache (.layers list of per-layer cache objects)
+
+    NOTE: run_ablated_forward already sets attention_mask=0 at ablate_position,
+    which zeroes the attention weight via softmax. The v-zeroing here is
+    belt-and-suspenders; if we cannot reach the value tensors we return the
+    cache unchanged and rely on the mask alone.
     """
-    if hasattr(past_kv, 'key_cache'):
-        # transformers >= 5.x: DynamicCache with .key_cache / .value_cache lists
-        for i in range(len(past_kv.key_cache)):
-            past_kv.value_cache[i] = past_kv.value_cache[i].clone()
-            past_kv.value_cache[i][:, :, ablate_position, :] = 0.0
-        return past_kv
-    else:
-        # Legacy tuple-of-tuples; first two elements per layer are (key, value).
-        # Use index access instead of unpacking to handle layers with >2 elements.
+    if isinstance(past_kv, tuple):
+        # Legacy tuple-of-tuples; use index access to handle layers with >2 elements.
         ablated = []
         for layer_kv in past_kv:
             layer = list(layer_kv)
@@ -67,6 +84,26 @@ def _ablate_kv(past_kv, ablate_position: int):
             layer[1][:, :, ablate_position, :] = 0.0
             ablated.append(tuple(layer))
         return tuple(ablated)
+
+    # Modern Cache object — mutate in-place and return the same object.
+
+    # Pattern A: transformers 4.x / 5.0–5.6 DynamicCache
+    if hasattr(past_kv, 'value_cache') and isinstance(past_kv.value_cache, list):
+        for i in range(len(past_kv.value_cache)):
+            v = past_kv.value_cache[i]
+            if isinstance(v, torch.Tensor) and v.shape[2] > ablate_position:
+                past_kv.value_cache[i] = v.clone()
+                past_kv.value_cache[i][:, :, ablate_position, :] = 0.0
+        return past_kv
+
+    # Pattern B: transformers 5.7+ DynamicCache with per-layer objects
+    if hasattr(past_kv, 'layers') and past_kv.layers:
+        for layer in past_kv.layers:
+            _zero_value_tensor(layer, ablate_position)
+        return past_kv
+
+    # Unknown structure — return unchanged; attention_mask already handles exclusion.
+    return past_kv
 
 
 def run_ablated_forward(
