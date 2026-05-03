@@ -1,43 +1,77 @@
 """
-Forward hooks to capture attention weights during a single forward pass
-without modifying model internals.
+Forward hooks to capture attention statistics during a single forward pass.
+
+Instead of storing full [layers, heads, seq, seq] attention matrices
+(38 GB for seq_len=4K on 32-layer model — causes OOM), we accumulate
+H2O and SnapKV statistics incrementally per layer and immediately free
+each layer's GPU attention tensor via hook output replacement.
 """
 
+import numpy as np
 import torch
-from typing import List, Optional
 from contextlib import contextmanager
+from typing import Optional
 
 
 class AttentionCapture:
     """
-    Captures attention weight matrices from all layers during a forward pass
-    via PyTorch forward hooks.
+    Captures H2O and SnapKV attention statistics during a single forward pass.
+
+    The hook fires once per attention layer. It:
+      1. Accumulates column sums (for H2O) across layers.
+      2. Overwrites the stored observation-window rows with the current layer
+         (so only the last layer's rows are kept — this is what SnapKV uses).
+      3. Replaces attn_weights in the layer output with None so PyTorch frees
+         the GPU tensor before the next layer runs.
+
+    Peak extra VRAM: one layer's [heads, seq, seq] at a time (~1.2 GB for
+    seq_len=4K on Llama 3 8B) rather than all 32 layers simultaneously.
 
     Usage:
         capture = AttentionCapture(model)
         with capture.capture():
-            outputs = model(**inputs, output_attentions=True)
-        attn_weights = capture.get_weights()  # [num_layers, batch, heads, seq, seq]
+            _ = model(**inputs, output_attentions=True)
+        h2o_scores   = capture.get_h2o_scores()    # [seq_len]
+        snapkv_scores = capture.get_snapkv_scores() # [seq_len]
     """
 
-    def __init__(self, model):
+    def __init__(self, model, obs_window: int = 32, recent_window: int = 20):
         self.model = model
-        self._weights: List[torch.Tensor] = []
+        self.obs_window = obs_window
+        self.recent_window = recent_window
         self._hooks = []
+        self._h2o_sum: Optional[np.ndarray] = None
+        self._h2o_count: int = 0
+        self._snapkv_last: Optional[np.ndarray] = None  # [heads, obs, seq]
 
     def _hook_fn(self, module, input, output):
-        """
-        Registered on each self_attn layer.
-        output[1] is the attention weight matrix when output_attentions=True.
-        Move to CPU immediately to avoid accumulating on GPU across 32 layers.
-        """
-        if isinstance(output, tuple) and len(output) > 1 and output[1] is not None:
-            # Shape: [batch, heads, seq_len, seq_len]
-            self._weights.append(output[1].detach().cpu())
+        if not (isinstance(output, tuple) and len(output) > 1 and output[1] is not None):
+            return output
+
+        attn_w = output[1]  # [batch, heads, seq, seq]
+
+        with torch.no_grad():
+            # H2O: head-averaged column sum for this layer  →  [seq]
+            col = attn_w[0].mean(0).sum(0).cpu().numpy()
+            if self._h2o_sum is None:
+                self._h2o_sum = col.copy()
+            else:
+                self._h2o_sum += col
+            self._h2o_count += 1
+
+            # SnapKV: keep last obs_window query rows of this layer  →  [heads, obs, seq]
+            obs = min(self.obs_window, attn_w.shape[2])
+            self._snapkv_last = attn_w[0, :, -obs:, :].cpu().numpy()
+
+        # Replace with None so PyTorch frees the GPU tensor immediately
+        return (output[0], None) + output[2:]
 
     @contextmanager
     def capture(self):
-        """Context manager: installs hooks before yield, removes them after."""
+        """Context manager: resets state, installs hooks, removes them on exit."""
+        self._h2o_sum = None
+        self._h2o_count = 0
+        self._snapkv_last = None
         try:
             for layer in self.model.model.layers:
                 h = layer.self_attn.register_forward_hook(self._hook_fn)
@@ -48,15 +82,22 @@ class AttentionCapture:
                 h.remove()
             self._hooks.clear()
 
-    def get_weights(self) -> Optional[torch.Tensor]:
-        """
-        Returns stacked attention weights.
-        Shape: [num_layers, batch, heads, seq_len, seq_len]
-        Returns None if no weights were captured.
-        """
-        if not self._weights:
+    def get_h2o_scores(self) -> Optional[np.ndarray]:
+        """H2O score: mean column-sum across layers + recency bonus. Shape: [seq_len]."""
+        if self._h2o_sum is None:
             return None
-        return torch.stack(self._weights, dim=0)
+        heavy = self._h2o_sum / max(self._h2o_count, 1)
+        recency_bonus = np.zeros_like(heavy)
+        recency_bonus[-self.recent_window:] = heavy.max() * 10
+        return heavy + recency_bonus
+
+    def get_snapkv_scores(self) -> Optional[np.ndarray]:
+        """SnapKV score: mean of last-layer obs-window attention. Shape: [seq_len]."""
+        if self._snapkv_last is None:
+            return None
+        return self._snapkv_last.mean(axis=0).mean(axis=0)
 
     def clear(self):
-        self._weights.clear()
+        self._h2o_sum = None
+        self._h2o_count = 0
+        self._snapkv_last = None

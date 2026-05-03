@@ -26,11 +26,7 @@ from tqdm import tqdm
 from semantickv.model.loader import load_model
 from semantickv.model.hooks import AttentionCapture
 from semantickv.ablation.counterfactual import compute_importance_scores
-from semantickv.ablation.scoring import (
-    compute_h2o_scores,
-    compute_snapkv_scores,
-    evaluate_heuristic,
-)
+from semantickv.ablation.scoring import evaluate_heuristic
 
 
 MODEL_PATH = "./models/llama3-8b-instruct"
@@ -149,24 +145,21 @@ def main():
             sample_fraction=SAMPLE_FRACTION,
         )
 
-        # Step 2: capture attention for heuristic computation (single forward pass)
+        # Step 2: capture attention statistics (memory-efficient: one layer at a time)
         print("  Capturing attention weights for heuristics...")
         inputs = tokenizer(prompt_data["text"], return_tensors="pt").to(model.device)
         with capture.capture():
             with torch.no_grad():
                 _ = model(**inputs, output_attentions=True)
-        attn_weights = capture.get_weights()    # [layers, batch, heads, seq, seq]
-        capture.clear()
 
-        if attn_weights is None:
+        h2o_scores    = capture.get_h2o_scores()
+        snapkv_scores = capture.get_snapkv_scores()
+
+        if h2o_scores is None or snapkv_scores is None:
             print("  Warning: no attention weights captured, skipping.")
             continue
 
-        attn_np = attn_weights[:, 0, :, :, :].numpy()  # [layers, heads, seq, seq]
-
-        # Step 3: heuristic scores
-        h2o_scores = compute_h2o_scores(attn_np.mean(axis=0))
-        snapkv_scores = compute_snapkv_scores(attn_np)
+        # Step 3: heuristic scores already computed inside the hook
         gt_scores = importance_data["importance_scores"]
 
         # Step 4: evaluate
