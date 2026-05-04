@@ -51,8 +51,12 @@ class AttentionCapture:
         attn_w = output[1]  # [batch, heads, seq, seq]
 
         with torch.no_grad():
+            # Cast to float32 before numpy — fp16 overflows when summing
+            # 4K+ attention weights across 32 layers (fp16 max ~65504).
+            attn_f32 = attn_w[0].float()  # [heads, seq, seq]
+
             # H2O: head-averaged column sum for this layer  →  [seq]
-            col = attn_w[0].mean(0).sum(0).cpu().numpy()
+            col = attn_f32.mean(0).sum(0).cpu().numpy()
             if self._h2o_sum is None:
                 self._h2o_sum = col.copy()
             else:
@@ -60,8 +64,8 @@ class AttentionCapture:
             self._h2o_count += 1
 
             # SnapKV: keep last obs_window query rows of this layer  →  [heads, obs, seq]
-            obs = min(self.obs_window, attn_w.shape[2])
-            self._snapkv_last = attn_w[0, :, -obs:, :].cpu().numpy()
+            obs = min(self.obs_window, attn_f32.shape[1])
+            self._snapkv_last = attn_f32[:, -obs:, :].cpu().numpy()
 
         # Replace with None so PyTorch frees the GPU tensor immediately
         return (output[0], None) + output[2:]

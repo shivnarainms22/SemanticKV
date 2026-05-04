@@ -71,7 +71,8 @@ def evaluate_heuristic(
     """
     binary_gt = binarize_importance(ground_truth_scores, keep_fraction)
 
-    h_norm = heuristic_scores - heuristic_scores.min()
+    h_norm = np.nan_to_num(heuristic_scores, nan=0.0, posinf=0.0, neginf=0.0)
+    h_norm = h_norm - h_norm.min()
     if h_norm.max() > 0:
         h_norm = h_norm / h_norm.max()
 
