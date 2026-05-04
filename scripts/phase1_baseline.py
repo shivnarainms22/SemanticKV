@@ -15,6 +15,7 @@ Runtime: ~44 GPU hrs for N_PROMPTS=50, SAMPLE_FRACTION=0.5 on A100 80GB
 Cost:    ~$66 on RunPod @ $1.50/hr
 """
 
+import gc
 import json
 import torch
 import numpy as np
@@ -130,6 +131,14 @@ def main():
     for i, prompt_data in enumerate(tqdm(prompts, desc="Processing prompts")):
         print(f"\n--- Prompt {i+1}/{N_PROMPTS} (task: {prompt_data['task']}) ---")
 
+        # Resume: if this prompt was already completed in a prior run, reload and skip.
+        result_path = OUTPUT_DIR / f"result_{i:04d}.json"
+        if result_path.exists():
+            with open(result_path) as f:
+                results.append(json.load(f))
+            print(f"  Skipping: already completed (loaded {result_path.name})")
+            continue
+
         tokens = tokenizer(prompt_data["text"], return_tensors="pt")
         seq_len = tokens["input_ids"].shape[1]
 
@@ -180,11 +189,20 @@ def main():
         results.append(result)
 
         # Save incrementally — RunPod instances can die
-        with open(OUTPUT_DIR / f"result_{i:04d}.json", "w") as f:
+        with open(result_path, "w") as f:
             json.dump(result, f)
 
         print(f"  H2O    AUC={h2o_eval['auc_roc']:.3f}  Top-K Recall={h2o_eval['top_k_recall']:.3f}")
         print(f"  SnapKV AUC={snapkv_eval['auc_roc']:.3f}  Top-K Recall={snapkv_eval['top_k_recall']:.3f}")
+
+        # Free everything before the next prompt — PyTorch's allocator reservations
+        # accumulate across prompts otherwise, OOMing after a few long ones.
+        del importance_data, h2o_scores, snapkv_scores, inputs, tokens, gt_scores, result
+        capture.clear()
+        gc.collect()
+        torch.cuda.empty_cache()
+        print(f"  GPU mem: {torch.cuda.memory_allocated()/1e9:.1f}GB allocated, "
+              f"{torch.cuda.memory_reserved()/1e9:.1f}GB reserved")
 
     if not results:
         print("No results collected. Check prompt lengths and model loading.")

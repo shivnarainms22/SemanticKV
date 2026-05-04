@@ -151,9 +151,14 @@ def compute_importance_scores(
     importance_scores[:skip_first_n] = 1.0
     importance_scores[seq_len - skip_last_n:] = 1.0
 
-    for pos in tqdm(positions_to_test, desc=f"Ablating (seq_len={seq_len})"):
+    for step, pos in enumerate(tqdm(positions_to_test, desc=f"Ablating (seq_len={seq_len})")):
         ablated_logits = run_ablated_forward(model, input_ids, pos, max_new_tokens)
         importance_scores[pos] = compute_output_divergence(baseline_logits, ablated_logits)
+        del ablated_logits
+        # Each ablated forward allocates a fresh past_key_values cache (~GBs at long
+        # seq_len). Allocator reservations grow without bound otherwise.
+        if (step + 1) % 500 == 0:
+            torch.cuda.empty_cache()
 
     return {
         "tokens": tokens,
