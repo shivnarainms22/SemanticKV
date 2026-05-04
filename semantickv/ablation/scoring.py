@@ -63,25 +63,36 @@ def evaluate_heuristic(
     """
     Evaluate how well a heuristic predicts true token importance.
 
+    Only positions with a real ground-truth label are scored. Unsampled
+    positions are NaN by convention (see compute_importance_scores) and
+    masked out — including them as zeros would bias AUC.
+
     Metrics:
     - AUC-ROC: overall ranking quality (target: < 0.75 to show the gap)
     - Average Precision: precision-recall quality
     - Top-K Recall: of the truly important tokens, what fraction does the
       heuristic correctly identify in its top-K?
     """
-    binary_gt = binarize_importance(ground_truth_scores, keep_fraction)
+    valid = ~np.isnan(ground_truth_scores)
+    gt = ground_truth_scores[valid]
+    h = np.nan_to_num(heuristic_scores, nan=0.0, posinf=0.0, neginf=0.0)[valid]
 
-    h_norm = np.nan_to_num(heuristic_scores, nan=0.0, posinf=0.0, neginf=0.0)
-    h_norm = h_norm - h_norm.min()
+    binary_gt = binarize_importance(gt, keep_fraction)
+
+    h_norm = h - h.min()
     if h_norm.max() > 0:
         h_norm = h_norm / h_norm.max()
 
-    auc = roc_auc_score(binary_gt, h_norm)
-    ap = average_precision_score(binary_gt, h_norm)
+    if len(np.unique(binary_gt)) < 2:
+        auc = float("nan")
+        ap = float("nan")
+    else:
+        auc = roc_auc_score(binary_gt, h_norm)
+        ap = average_precision_score(binary_gt, h_norm)
 
-    k = int(keep_fraction * len(ground_truth_scores))
-    heuristic_top_k = set(np.argsort(heuristic_scores)[-k:])
-    true_top_k = set(np.argsort(ground_truth_scores)[-k:])
+    k = max(1, int(keep_fraction * len(gt)))
+    heuristic_top_k = set(np.argsort(h)[-k:])
+    true_top_k = set(np.argsort(gt)[-k:])
     top_k_recall = len(heuristic_top_k & true_top_k) / max(len(true_top_k), 1)
 
     return {
@@ -90,4 +101,5 @@ def evaluate_heuristic(
         "average_precision": ap,
         "top_k_recall": top_k_recall,
         "keep_fraction": keep_fraction,
+        "n_evaluated": int(valid.sum()),
     }

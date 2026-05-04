@@ -97,6 +97,9 @@ def plot_scatter(results, output_path: Path):
         for result in results:
             gt = np.array(result["gt_scores"])
             h = np.array(result[f"{method}_scores"])
+            valid = ~np.isnan(gt)
+            gt = gt[valid]
+            h = h[valid]
             color = task_colors.get(result["task"], "gray")
             ax.scatter(
                 np.argsort(np.argsort(h)),      # heuristic rank
@@ -208,22 +211,25 @@ def main():
         print("No results collected. Check prompt lengths and model loading.")
         return
 
-    # Summary
+    # Summary — use nanmean/nanstd because individual prompts can yield NaN AUC
+    # when the binarized ground truth is single-class (rare with full sampling).
     print("\n=== PHASE 1 SUMMARY ===")
     for method in ["h2o", "snapkv"]:
         key = f"{method}_eval"
-        aucs = [r[key]["auc_roc"] for r in results]
-        recalls = [r[key]["top_k_recall"] for r in results]
-        print(f"{method.upper():8s}  Mean AUC={np.mean(aucs):.3f}±{np.std(aucs):.3f}  "
-              f"Mean Top-K Recall={np.mean(recalls):.3f}±{np.std(recalls):.3f}")
+        aucs = np.array([r[key]["auc_roc"] for r in results], dtype=float)
+        recalls = np.array([r[key]["top_k_recall"] for r in results], dtype=float)
+        n_valid = int(np.sum(~np.isnan(aucs)))
+        print(f"{method.upper():8s}  Mean AUC={np.nanmean(aucs):.3f}±{np.nanstd(aucs):.3f}  "
+              f"Mean Top-K Recall={np.nanmean(recalls):.3f}±{np.nanstd(recalls):.3f}  "
+              f"(AUC over {n_valid}/{len(results)} prompts)")
 
     summary = {
         "n_prompts": len(results),
         "keep_fraction": KEEP_FRACTION,
-        "h2o_mean_auc": float(np.mean([r["h2o_eval"]["auc_roc"] for r in results])),
-        "snapkv_mean_auc": float(np.mean([r["snapkv_eval"]["auc_roc"] for r in results])),
-        "h2o_mean_recall": float(np.mean([r["h2o_eval"]["top_k_recall"] for r in results])),
-        "snapkv_mean_recall": float(np.mean([r["snapkv_eval"]["top_k_recall"] for r in results])),
+        "h2o_mean_auc": float(np.nanmean([r["h2o_eval"]["auc_roc"] for r in results])),
+        "snapkv_mean_auc": float(np.nanmean([r["snapkv_eval"]["auc_roc"] for r in results])),
+        "h2o_mean_recall": float(np.nanmean([r["h2o_eval"]["top_k_recall"] for r in results])),
+        "snapkv_mean_recall": float(np.nanmean([r["snapkv_eval"]["top_k_recall"] for r in results])),
     }
     with open(OUTPUT_DIR / "phase1_summary.json", "w") as f:
         json.dump(summary, f, indent=2)

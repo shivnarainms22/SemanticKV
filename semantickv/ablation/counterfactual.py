@@ -147,7 +147,9 @@ def compute_importance_scores(
             positions_to_test, n_sample, replace=False
         ).tolist()
 
-    importance_scores = np.zeros(seq_len)
+    # NaN = unsampled (unknown). Distinct from 0 (sampled, low impact).
+    # evaluate_heuristic masks out NaNs so AUC isn't biased by unlabeled positions.
+    importance_scores = np.full(seq_len, np.nan)
     importance_scores[:skip_first_n] = 1.0
     importance_scores[seq_len - skip_last_n:] = 1.0
 
