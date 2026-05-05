@@ -17,6 +17,7 @@ Cost:    ~$66 on RunPod @ $1.50/hr
 
 import gc
 import json
+import sys
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
@@ -41,6 +42,16 @@ SAMPLE_FRACTION = 0.5
 # shape. At seq=5620 with 32 heads we already saw OOM on an 80GB A100; 5000
 # leaves margin for fragmentation accumulated across prompts.
 MAX_SEQ_LEN = 5000
+
+# Memory-leak workaround: transformers' output_capturing wrapper retains
+# attention tensor references that survive del/gc/empty_cache. The leak
+# is ~32×heads×seq² bytes per processed prompt — for seq=4690 that's 45 GB
+# stuck. Rather than fight this, we exit cleanly when GPU memory exceeds
+# the threshold; a bash wrapper restarts Python and the OS reclaims memory.
+# Resume logic picks up from the next undone prompt.
+MEM_RESTART_THRESHOLD_GB = 25.0
+MAX_PROMPTS_PER_INVOCATION = 5  # backstop in case the threshold is too lax
+EXIT_RESTART_REQUESTED = 2       # bash wrapper checks for this code
 
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -135,6 +146,7 @@ def main():
     prompts = load_evaluation_prompts(N_PROMPTS)
 
     results = []
+    processed_this_run = 0
 
     for i, prompt_data in enumerate(tqdm(prompts, desc="Processing prompts")):
         print(f"\n--- Prompt {i+1}/{N_PROMPTS} (task: {prompt_data['task']}) ---")
@@ -146,6 +158,15 @@ def main():
                 results.append(json.load(f))
             print(f"  Skipping: already completed (loaded {result_path.name})")
             continue
+
+        # Memory-leak workaround: if the previous prompt left dangling
+        # attention tensors (transformers output_capturing pinning), exit
+        # cleanly so the bash wrapper can restart Python with a clean GPU.
+        mem_gb = torch.cuda.memory_allocated() / 1e9
+        if mem_gb > MEM_RESTART_THRESHOLD_GB or processed_this_run >= MAX_PROMPTS_PER_INVOCATION:
+            print(f"  GPU mem {mem_gb:.1f}GB / processed {processed_this_run} this run "
+                  f"— exiting for memory reset. Bash wrapper will resume.")
+            sys.exit(EXIT_RESTART_REQUESTED)
 
         tokens = tokenizer(prompt_data["text"], return_tensors="pt")
         seq_len = tokens["input_ids"].shape[1]
@@ -224,8 +245,10 @@ def main():
         capture.clear()
         gc.collect()
         torch.cuda.empty_cache()
+        processed_this_run += 1
         print(f"  GPU mem: {torch.cuda.memory_allocated()/1e9:.1f}GB allocated, "
-              f"{torch.cuda.memory_reserved()/1e9:.1f}GB reserved")
+              f"{torch.cuda.memory_reserved()/1e9:.1f}GB reserved "
+              f"(processed {processed_this_run} this run)")
 
     if not results:
         print("No results collected. Check prompt lengths and model loading.")
