@@ -36,6 +36,11 @@ N_PROMPTS = 50
 KEEP_FRACTION = 0.3
 MAX_NEW_TOKENS = 50
 SAMPLE_FRACTION = 0.5
+# Hard cap on prompt length. The output_attentions forward materializes a
+# [heads, seq, seq] fp16 tensor and a transient fp32 softmax copy of the same
+# shape. At seq=5620 with 32 heads we already saw OOM on an 80GB A100; 5000
+# leaves margin for fragmentation accumulated across prompts.
+MAX_SEQ_LEN = 5000
 
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -145,20 +150,22 @@ def main():
         tokens = tokenizer(prompt_data["text"], return_tensors="pt")
         seq_len = tokens["input_ids"].shape[1]
 
-        if seq_len < 100 or seq_len > 8000:
+        if seq_len < 100 or seq_len > MAX_SEQ_LEN:
             print(f"  Skipping: seq_len={seq_len} out of range")
             continue
 
-        # Step 1: ground truth counterfactual importance
-        print(f"  Computing counterfactual importance (seq_len={seq_len})...")
-        importance_data = compute_importance_scores(
-            model, tokenizer, prompt_data["text"],
-            max_new_tokens=MAX_NEW_TOKENS,
-            sample_fraction=SAMPLE_FRACTION,
-        )
+        # Defragment before the heavy single forward. The previous prompt's
+        # ablation loop leaves the allocator with thousands of small holes
+        # that empty_cache alone (across the iteration boundary) doesn't
+        # always coalesce — we've seen 56GB allocated post-cleanup.
+        gc.collect()
+        torch.cuda.empty_cache()
 
-        # Step 2: capture attention statistics (memory-efficient: one layer at a time)
-        print("  Capturing attention weights for heuristics...")
+        # Step 1: capture attention statistics FIRST, while the allocator is
+        # clean. The output_attentions forward needs a contiguous ~5GB block
+        # for the fp32 softmax intermediate per layer; running it before the
+        # ablation loop avoids fighting fragmentation from past_kv churn.
+        print(f"  Capturing attention weights for heuristics (seq_len={seq_len})...")
         inputs = tokenizer(prompt_data["text"], return_tensors="pt").to(model.device)
         with capture.capture():
             with torch.no_grad():
@@ -170,6 +177,18 @@ def main():
         if h2o_scores is None or snapkv_scores is None:
             print("  Warning: no attention weights captured, skipping.")
             continue
+
+        del inputs
+        torch.cuda.empty_cache()
+
+        # Step 2: ground truth counterfactual importance (creates the
+        # fragmenting per-ablation past_kv caches, hence done after capture).
+        print(f"  Computing counterfactual importance (seq_len={seq_len})...")
+        importance_data = compute_importance_scores(
+            model, tokenizer, prompt_data["text"],
+            max_new_tokens=MAX_NEW_TOKENS,
+            sample_fraction=SAMPLE_FRACTION,
+        )
 
         # Step 3: heuristic scores already computed inside the hook
         gt_scores = importance_data["importance_scores"]
@@ -200,7 +219,8 @@ def main():
 
         # Free everything before the next prompt — PyTorch's allocator reservations
         # accumulate across prompts otherwise, OOMing after a few long ones.
-        del importance_data, h2o_scores, snapkv_scores, inputs, tokens, gt_scores, result
+        # (inputs was already deleted right after the capture forward.)
+        del importance_data, h2o_scores, snapkv_scores, tokens, gt_scores, result
         capture.clear()
         gc.collect()
         torch.cuda.empty_cache()
