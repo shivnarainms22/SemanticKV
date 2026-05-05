@@ -28,7 +28,9 @@ def load_model(
 
     model = AutoModelForCausalLM.from_pretrained(
         model_path,
-        dtype=dtype,
+        torch_dtype=dtype,              # `torch_dtype` is the canonical name in
+                                        # transformers <4.50; `dtype` was added
+                                        # later as an alias and breaks on 4.46.
         device_map=device,
         attn_implementation="eager",   # NOT flash_attention_2
         output_attentions=False,        # We use hooks instead (more efficient)
