@@ -1,5 +1,8 @@
 torch>=2.2.0
-transformers>=4.40.0
+# Cap transformers below 4.50: 4.50+ adds MoE custom_ops requiring a newer
+# torch schema-inference API than the RunPod base image provides; observed
+# ImportError on 2026-05-05 fresh pod. 4.46.3 is the last known-good for us.
+transformers>=4.40.0,<4.50
 accelerate>=0.28.0
 datasets>=2.18.0
 numpy>=1.26.0
