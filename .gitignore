@@ -14,6 +14,11 @@ models/
 
 # Data (generated, not source)
 data/
+# Whitelist Phase 1 result JSONs as restart-safe backups (small, ~250KB each).
+!data/
+!data/processed/
+!data/processed/phase1_results/
+!data/processed/phase1_results/*.json
 
 # Experiment outputs and checkpoints
 experiments/checkpoints/
